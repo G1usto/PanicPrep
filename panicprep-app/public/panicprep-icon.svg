@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">PanicPrep icon</title>
+  <desc id="desc">A simple PanicPrep app icon placeholder.</desc>
+  <rect width="512" height="512" rx="112" fill="#020617"/>
+  <circle cx="256" cy="256" r="176" fill="#6ee7b7"/>
+  <path fill="#020617" d="M166 172h129c55 0 91 33 91 82s-36 82-91 82h-55v72h-74V172Zm74 104h48c16 0 25-8 25-22s-9-22-25-22h-48v44Z"/>
+  <path fill="#020617" d="M152 378h208v38H152z" opacity=".78"/>
+</svg>
