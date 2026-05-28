@@ -39,14 +39,13 @@ type HistoryItem = {
   imagePreview: string;
   response: string;
   prompt: string;
+  aiSource?: "mock" | "groq";
   quizState?: QuizState;
   createdAt: string;
 };
 
 const STORAGE_KEY = "panicprep-history";
-const API_KEY_STORAGE_KEY = "panicprep-test-api-key";
 const HISTORY_CHANGE_EVENT = "panicprep-history-change";
-const API_KEY_CHANGE_EVENT = "panicprep-api-key-change";
 
 const modes: Array<{ id: ModeId; label: string; description: string }> = [
   {
@@ -175,30 +174,12 @@ function subscribeToHistory(callback: () => void) {
   };
 }
 
-function subscribeToApiKey(callback: () => void) {
-  window.addEventListener("storage", callback);
-  window.addEventListener(API_KEY_CHANGE_EVENT, callback);
-
-  return () => {
-    window.removeEventListener("storage", callback);
-    window.removeEventListener(API_KEY_CHANGE_EVENT, callback);
-  };
-}
-
 function getHistorySnapshot() {
   return window.localStorage.getItem(STORAGE_KEY) ?? "[]";
 }
 
-function getApiKeySnapshot() {
-  return window.localStorage.getItem(API_KEY_STORAGE_KEY) ?? "";
-}
-
 function getServerHistorySnapshot() {
   return "[]";
-}
-
-function getServerApiKeySnapshot() {
-  return "";
 }
 
 function subscribeToClientReady(callback: () => void) {
@@ -225,18 +206,6 @@ function parseHistory(snapshot: string) {
 function saveHistory(history: HistoryItem[]) {
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(history));
   window.dispatchEvent(new Event(HISTORY_CHANGE_EVENT));
-}
-
-function saveApiKey(apiKey: string) {
-  const trimmedKey = apiKey.trim();
-
-  if (trimmedKey) {
-    window.localStorage.setItem(API_KEY_STORAGE_KEY, trimmedKey);
-  } else {
-    window.localStorage.removeItem(API_KEY_STORAGE_KEY);
-  }
-
-  window.dispatchEvent(new Event(API_KEY_CHANGE_EVENT));
 }
 
 function createFreshQuizState(): QuizState {
@@ -319,10 +288,12 @@ export default function Home() {
   const [activePrompt, setActivePrompt] = useState("");
   const [quizState, setQuizState] = useState<QuizState>(() => createFreshQuizState());
   const [activeHistoryId, setActiveHistoryId] = useState("");
-  const [apiKeyInput, setApiKeyInput] = useState("");
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState("");
+  const [aiSource, setAiSource] = useState<"mock" | "groq">("mock");
+  const [apiMessage, setApiMessage] = useState("");
   const [hasResponse, setHasResponse] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [apiKeySaved, setApiKeySaved] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isClientReady = useSyncExternalStore(
     subscribeToClientReady,
@@ -334,12 +305,6 @@ export default function Home() {
     getHistorySnapshot,
     getServerHistorySnapshot,
   );
-  const savedApiKey = useSyncExternalStore(
-    subscribeToApiKey,
-    getApiKeySnapshot,
-    getServerApiKeySnapshot,
-  );
-
   const selectedModeMeta = modes.find((mode) => mode.id === selectedMode) ?? modes[0];
   const history = useMemo(() => parseHistory(historySnapshot), [historySnapshot]);
   const generatedPrompt = useMemo(() => {
@@ -369,6 +334,9 @@ Important: Use the image I attach in this chat as the source of truth. If you ca
     setActivePrompt("");
     setActiveHistoryId("");
     setQuizState(createFreshQuizState());
+    setAiSource("mock");
+    setApiMessage("");
+    setLoadingMessage("");
     setHasResponse(false);
     setCopied(false);
 
@@ -379,36 +347,82 @@ Important: Use the image I attach in this chat as the source of truth. If you ca
     reader.readAsDataURL(file);
   }
 
-  function handleGenerate() {
+  async function requestGroqResponse(nextPrompt: string) {
+    const response = await fetch("/api/groq", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        prompt: nextPrompt,
+        mode: selectedMode,
+        imageName: imageName || "Homework image",
+        extractedText: "",
+      }),
+    });
+    const data = await response.json();
+
+    if (!response.ok || data.fallback || !data.response) {
+      return {
+        source: "mock" as const,
+        response: mockResponses[selectedMode],
+        message: data.error || "Groq is unavailable. Using local mock mode.",
+      };
+    }
+
+    return {
+      source: "groq" as const,
+      response: data.response as string,
+      message: `Generated with Groq ${data.model || "llama-3.3-70b-versatile"}.`,
+    };
+  }
+
+  async function handleGenerate() {
     if (!imagePreview) {
       fileInputRef.current?.click();
       return;
     }
 
-    const nextResponse = mockResponses[selectedMode];
     const nextPrompt = generatedPrompt;
     const nextQuizState = selectedMode === "quiz" ? createFreshQuizState() : undefined;
     const nextHistoryId = crypto.randomUUID();
+    setIsGenerating(true);
+    setLoadingMessage("Reading image...");
+    setApiMessage("");
+    await new Promise((resolve) => window.setTimeout(resolve, 450));
+    setLoadingMessage(selectedMode === "quiz" ? "Generating quiz..." : "Thinking...");
+
+    const groqResult = await requestGroqResponse(nextPrompt).catch(() => ({
+      source: "mock" as const,
+      response: mockResponses[selectedMode],
+      message: "Groq request failed. Using local mock mode.",
+    }));
+
     const nextHistoryItem: HistoryItem = {
       id: nextHistoryId,
       mode: selectedMode,
       modeLabel: selectedModeMeta.label,
       imageName: imageName || "Homework image",
       imagePreview,
-      response: nextResponse,
+      response: groqResult.response,
       prompt: nextPrompt,
+      aiSource: groqResult.source,
       quizState: nextQuizState,
       createdAt: new Date().toISOString(),
     };
 
-    setActiveResponse(nextResponse);
+    setActiveResponse(groqResult.response);
     setActivePrompt(nextPrompt);
     setActiveHistoryId(nextHistoryId);
+    setAiSource(groqResult.source);
+    setApiMessage(groqResult.message);
     if (nextQuizState) {
       setQuizState(nextQuizState);
     }
     setHasResponse(true);
     setCopied(false);
+    setIsGenerating(false);
+    setLoadingMessage("");
     saveHistory([nextHistoryItem, ...history].slice(0, 8));
   }
 
@@ -425,6 +439,8 @@ Important: Use the image I attach in this chat as the source of truth. If you ca
     setActiveResponse(item.response);
     setActivePrompt(item.prompt);
     setActiveHistoryId(item.id);
+    setAiSource(item.aiSource ?? "mock");
+    setApiMessage("");
     setQuizState(item.quizState ?? createFreshQuizState());
     setHasResponse(true);
     setCopied(false);
@@ -432,13 +448,6 @@ Important: Use the image I attach in this chat as the source of truth. If you ca
 
   function clearHistory() {
     saveHistory([]);
-  }
-
-  function handleSaveApiKey() {
-    saveApiKey(apiKeyInput);
-    setApiKeyInput("");
-    setApiKeySaved(true);
-    window.setTimeout(() => setApiKeySaved(false), 1800);
   }
 
   function saveQuizProgress(nextQuizState: QuizState) {
@@ -452,7 +461,7 @@ Important: Use the image I attach in this chat as the source of truth. If you ca
           ? {
               ...item,
               quizState: nextQuizState,
-              response: mockResponses.quiz,
+              response: activeResponse || item.response,
             }
           : item,
       ),
@@ -527,12 +536,12 @@ Important: Use the image I attach in this chat as the source of truth. If you ca
           <p className="text-sm font-medium text-emerald-300">Student panic helper</p>
           <h1 className="mt-2 text-4xl font-bold tracking-normal sm:text-5xl">PanicPrep</h1>
           <p className="mt-3 text-sm leading-6 text-zinc-300 sm:text-base sm:leading-7">
-            Upload a homework screenshot, pick the kind of help you need, then copy a ready prompt into ChatGPT or Claude.
+            Upload a homework screenshot, pick the kind of help you need, and get a Groq-powered answer when server AI is configured.
           </p>
         </header>
 
         <section className="rounded-2xl border border-amber-400/30 bg-amber-300/10 p-3 text-sm leading-6 text-amber-100 sm:rounded-3xl sm:p-4">
-          This public MVP uses mock AI responses and cannot truly read your image yet. For real answers, copy the prompt and attach your image in ChatGPT or Claude.
+          PanicPrep can use Groq when `GROQ_API_KEY` is configured on the server. If it is missing or unavailable, the app stays in local mock mode.
         </section>
 
         <section className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-3 shadow-2xl shadow-black/30 sm:p-4">
@@ -592,6 +601,9 @@ Important: Use the image I attach in this chat as the source of truth. If you ca
                     setActivePrompt("");
                     setActiveHistoryId("");
                     setQuizState(createFreshQuizState());
+                    setAiSource("mock");
+                    setApiMessage("");
+                    setLoadingMessage("");
                     setHasResponse(false);
                     setCopied(false);
                   }}
@@ -608,17 +620,29 @@ Important: Use the image I attach in this chat as the source of truth. If you ca
           <button
             className="mt-4 w-full rounded-2xl bg-white px-5 py-4 font-semibold text-zinc-950 transition hover:bg-emerald-200 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400 sm:mt-5"
             type="button"
+            disabled={isGenerating}
             onClick={handleGenerate}
           >
-            {imagePreview ? `Prepare ${selectedModeMeta.label} Prompt` : "Upload Image to Start"}
+            {isGenerating
+              ? loadingMessage || "Thinking..."
+              : imagePreview
+                ? `Generate ${selectedModeMeta.label}`
+                : "Upload Image to Start"}
           </button>
+          {isGenerating ? (
+            <p className="mt-3 text-center text-sm text-emerald-200">{loadingMessage || "Thinking..."}</p>
+          ) : null}
         </section>
 
         <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-3 sm:p-4">
           <div className="flex flex-col gap-3 min-[360px]:flex-row min-[360px]:items-center min-[360px]:justify-between">
             <div>
-              <h2 className="text-lg font-semibold">Mock AI Response</h2>
-              <p className="text-sm text-zinc-400">Mock mode cannot read your image yet.</p>
+              <h2 className="text-lg font-semibold">{aiSource === "groq" ? "AI Response" : "Mock AI Response"}</h2>
+              <p className="text-sm text-zinc-400">
+                {aiSource === "groq"
+                  ? "Generated through the server API route."
+                  : "Mock mode cannot read your image yet."}
+              </p>
             </div>
             <button
               className="w-full rounded-full border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-200 transition hover:border-emerald-300 hover:text-emerald-200 min-[360px]:w-auto"
@@ -631,6 +655,17 @@ Important: Use the image I attach in this chat as the source of truth. If you ca
 
           {selectedMode === "quiz" ? (
             <div className="mt-4 rounded-2xl bg-zinc-950 p-3 sm:p-4">
+              {apiMessage ? (
+                <div className="mb-4 rounded-2xl border border-zinc-800 bg-zinc-900 p-3 text-sm leading-6 text-zinc-300">
+                  {apiMessage}
+                </div>
+              ) : null}
+              {aiSource === "groq" && response ? (
+                <details className="mb-4 rounded-2xl border border-zinc-800 bg-zinc-900 p-3 text-sm leading-6 text-zinc-300">
+                  <summary className="cursor-pointer font-semibold text-zinc-100">Groq quiz draft</summary>
+                  <div className="mt-3 whitespace-pre-line">{response}</div>
+                </details>
+              ) : null}
               {!quizState.isComplete ? (
                 <div className="flex flex-col gap-4">
                   <div className="flex items-center justify-between gap-3">
@@ -774,6 +809,11 @@ Important: Use the image I attach in this chat as the source of truth. If you ca
             </div>
           ) : (
             <div className="mt-4 rounded-2xl bg-zinc-950 p-4">
+              {apiMessage ? (
+                <p className="mb-3 rounded-2xl border border-zinc-800 bg-zinc-900 p-3 text-sm leading-6 text-zinc-300">
+                  {apiMessage}
+                </p>
+              ) : null}
               <div className="min-h-28 whitespace-pre-line text-sm leading-7 text-zinc-200">
                 {response ||
                   "Mock mode cannot read your image yet.\n\nUpload an image and choose a mode to prepare a stronger prompt for ChatGPT/Claude."}
@@ -788,34 +828,9 @@ Important: Use the image I attach in this chat as the source of truth. If you ca
         </section>
 
         <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-3 sm:p-4">
-          <h2 className="text-lg font-semibold">Settings</h2>
+          <h2 className="text-lg font-semibold">Server AI Settings</h2>
           <p className="mt-2 text-sm leading-6 text-zinc-400">
-            Optional testing only: save an API key locally in this browser. PanicPrep does not send it anywhere yet.
-          </p>
-          <div className="mt-4 flex flex-col gap-2 min-[380px]:flex-row">
-            <input
-              className="min-h-12 flex-1 rounded-2xl border border-zinc-700 bg-zinc-950 px-4 text-sm text-white outline-none transition placeholder:text-zinc-600 focus:border-emerald-300"
-              type="password"
-              value={apiKeyInput}
-              placeholder={isClientReady && savedApiKey ? "Saved locally" : "Paste test API key"}
-              autoComplete="off"
-              onChange={(event) => {
-                setApiKeyInput(event.target.value);
-                setApiKeySaved(false);
-              }}
-            />
-            <button
-              className="min-h-12 rounded-2xl bg-zinc-100 px-5 text-sm font-semibold text-zinc-950 transition hover:bg-emerald-200"
-              type="button"
-              onClick={handleSaveApiKey}
-            >
-              {apiKeySaved ? "Saved" : "Save"}
-            </button>
-          </div>
-          <p className="mt-3 text-xs leading-5 text-zinc-500">
-            {isClientReady && savedApiKey
-              ? "A key is saved on this device for future testing."
-              : "No key is saved on this device."}
+            Add `GROQ_API_KEY=your_key_here` to `.env.local` and restart Next.js to enable Groq. The key is read only by `app/api/groq/route.ts` and is never pasted into the browser.
           </p>
         </section>
 
